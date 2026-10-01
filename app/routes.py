@@ -51,6 +51,19 @@ def err(status, code, **extra):
     return JSONResponse({"error": code, **extra}, status_code=status)
 
 
+@app.get("/")
+async def root():
+    return {
+        "service": "seat-reservation",
+        "links": {
+            "health": "/healthz",
+            "readiness": "/readyz",
+            "docs": "/docs",
+            "metrics": "/metrics",
+        },
+    }
+
+
 @app.post("/shows", status_code=201)
 async def create_show(body: ShowIn, _=Depends(admin)):
     if len(set(body.seats)) != len(body.seats) or any(not s or len(s) > 32 for s in body.seats):
