@@ -1,2 +1,2 @@
 #!/bin/sh
-exec python burst.py "$@"
+exec python3 burst.py "$@"
