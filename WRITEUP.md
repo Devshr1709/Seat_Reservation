@@ -6,7 +6,10 @@ The service uses FastAPI in front of Postgres as the system of record. The datab
 This approach matters because the correctness bar is framed around concurrency. A reservation request is not a read-then-write checklist in application memory; it is one atomic database transaction that decides whether the requested seats are still free and whether the user is still allowed to use them.
 
 ## Atomic decision and race-free seat allocation
-The key mechanism is a Postgres transaction guarded by a per-(user, show) advisory lock and a conditional update on seat rows.
+The key mechanism is one Postgres transaction, a transaction-scoped
+`pg_advisory_xact_lock` keyed by `(user, show)`, row locks acquired in sorted
+seat order, and a conditional update that only changes rows still marked
+`available`.
 
 In the implementation, the reservation path does the following:
 1. Serializes a user’s requests for a show with `pg_advisory_xact_lock`.
@@ -26,9 +29,17 @@ where show_id = $1
   and status = 'available'
 ```
 
-This is the atomic decision point. It is what prevents two concurrent reservations from both confirming the same seat. Under load, exactly one transaction wins the row update; the losers do not receive a 500 or a partial success — they receive a clean 409 decline and the app never guesses about state.
+This is the atomic decision point. PostgreSQL serializes conflicting row
+updates and checks `status = 'available'` as part of the write, so two
+transactions cannot both change the same seat from available to confirmed.
+The write and reservation record commit together; a failed transaction rolls
+back the entire multi-seat request.
 
-For multi-seat requests, the code sorts the requested seats and then locks the relevant seat rows in a consistent order. That removes lock cycles and keeps lock acquisition deterministic. The API also treats multi-seat reservation as all-or-nothing: if the request asks for more than one seat and any seat is unavailable, the transaction aborts and the whole request fails cleanly.
+For multi-seat requests, the code sorts seat IDs and selects the rows using
+`ORDER BY seat_id FOR UPDATE`. Every request therefore acquires overlapping
+seat locks in the same order, preventing lock-order cycles between these
+requests. If any seat is unavailable, no reservation is written and the whole
+transaction rolls back.
 
 ## Idempotency and exact-once semantics
 Idempotency is enforced at the database layer, not via local app-side caching. The table is:
@@ -47,7 +58,14 @@ The request hash is computed from the sorted seat list, so:
 - same user + same show + same key + same seat set => replay the original reservation
 - same user + same show + same key + different seat set => `409 idempotency_key_conflict`
 
-This is stored in the same transaction as the reservation row insertion, so there is no window where the API can create a duplicate reservation for the same key and then fail to persist the idempotency record.
+The primary key on `(user_id, show_id, key)` provides the uniqueness boundary.
+The reservation, seat updates, and idempotency row are committed in the same
+transaction, so there is no committed reservation without its key record.
+Concurrent requests for the same user and show are serialized by the advisory
+lock. Replaying the same key and seat set returns the stored reservation;
+reusing that key for a different seat set returns HTTP 409 with
+`idempotency_key_conflict`. This is exactly-once reservation creation per key
+within this database, not a claim about external side effects.
 
 ## Per-user limits and ownership
 The per-user limit is checked inside the same transaction that serializes the user’s requests. That guards against a race where a user fires many parallel requests that all read “I still have room” before the first one commits.
@@ -66,6 +84,16 @@ The cancellation logic is deliberately strict:
 - unknown reservation => `404 reservation_not_found`
 - owner cancels => reservation status transitions to `cancelled` and the seats are made available again
 
+## Holds and expiry
+
+Timed holds and automatic expiry are not implemented. A successful request
+confirms seats immediately; cancellation by the owner is the only release
+path. The schema permits a `held` status and responses report a held count,
+but this application never creates held rows, sets hold deadlines, or runs an
+expiry worker. Consequently, there is no expiry guarantee to rely on; adding
+holds requires an explicit deadline, transactional expiry transition, and a
+worker or equivalent request-time cleanup strategy.
+
 ## Reconciliation invariant
 The app reports counts from the database on `GET /shows/{id}` and computes:
 
@@ -73,7 +101,9 @@ The app reports counts from the database on `GET /shows/{id}` and computes:
 available + held + confirmed == total_seats
 ```
 
-In this implementation, there is no timed hold state. Seats are either available or confirmed; the `held` count remains zero unless the system is later extended to add a hold model. Even then, the same reconciliation rule still applies. This is the invariant the burst script checks after load.
+Seats are either available or confirmed in current operation; the `held`
+count remains zero. The same reconciliation rule would include held rows if a
+hold model is added. This is the invariant the burst script checks after load.
 
 ## Database readiness and fail-closed behavior
 The service is intentionally conservative when Postgres is unavailable. The startup hook calls `ensure_db()` and logs if it fails, but the app still serves requests. That is by design: a liveness endpoint can still return `200` while the dependency is down, but readiness is stricter.
@@ -84,6 +114,16 @@ The `/readyz` endpoint performs:
 - a `503` if the DB cannot be reached
 
 This is fail-closed: no false sense of readiness is advertised while the database is actually unavailable.
+
+## Consistency vs availability during a partition
+
+Postgres is the sole source of truth, and reservation writes have no
+in-memory or offline fallback. If the API cannot reach Postgres, it does not
+confirm a reservation; readiness returns `503` and recognized database
+connection failures return `503` to callers. Liveness may still return `200`
+because the process is up. This deliberately favors consistent seat ownership
+over write availability during a database partition: callers should retry
+after connectivity recovers using the same idempotency key.
 
 ## Observability and paging
 The service exposes a small but useful Prometheus surface:

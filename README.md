@@ -168,6 +168,17 @@ The key metrics are:
 
 Structured logs are written to stdout with a `request_id`, and the service honors an inbound `X-Request-ID` header when present.
 
+For a local Docker run:
+
+```bash
+curl -sS http://localhost:8000/metrics
+docker compose logs -f api
+```
+
+For a hosted deployment, open `https://<service-host>/metrics` for Prometheus
+text output and use the hosting provider's service log viewer (Render:
+Dashboard -> service -> Logs). No live service URL is available yet.
+
 ## Burst script
 
 This repository includes a one-command stress tool:
@@ -208,7 +219,10 @@ The expected deployment flow is:
 # deploy the repo or push to Render / Railway / Fly
 ```
 
-This environment did not publish a public URL from inside the workspace, so I did not fabricate one. The project is ready for deployment using the included Dockerfile and Render config, and it was verified locally with Docker and the included burst script.
+Live URL: not deployed yet. `render.yaml` is deployment configuration; it does
+not create a hosted service by itself. After deployment, use the service URL as
+`BASE_URL` when running the burst script and use the provider dashboard for
+runtime logs.
 
 ## Verified in this workspace
 
