@@ -1,9 +1,9 @@
 """On-sale stampede. Usage: python burst.py BASE_URL [--admin-token T] [--requests 20000] [--concurrency 500]"""
-import argparse, asyncio, collections, random, sys, time, uuid
+import argparse, asyncio, collections, os, random, sys, time, uuid
 import httpx
 
 ap = argparse.ArgumentParser()
-ap.add_argument("base"); ap.add_argument("--admin-token", default="admin-secret")
+ap.add_argument("base"); ap.add_argument("--admin-token", default=os.environ.get("ADMIN_TOKEN", "admin-secret"))
 ap.add_argument("--requests", type=int, default=20000)
 ap.add_argument("--concurrency", type=int, default=500)
 ap.add_argument("--seats", type=int, default=2000)
