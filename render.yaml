@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: seat-reservation
+    runtime: docker
+    plan: free
+    healthCheckPath: /readyz
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase: {name: seats-db, property: connectionString}
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: POOL_MAX
+        value: "10"
+databases:
+  - name: seats-db
+    plan: free
