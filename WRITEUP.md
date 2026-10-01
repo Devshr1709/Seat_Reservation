@@ -36,9 +36,11 @@ The write and reservation record commit together; a failed transaction rolls
 back the entire multi-seat request.
 
 For multi-seat requests, the code sorts seat IDs and selects the rows using
-`ORDER BY seat_id FOR UPDATE`. Every request therefore acquires overlapping
-seat locks in the same order, preventing lock-order cycles between these
-requests. If any seat is unavailable, no reservation is written and the whole
+`ORDER BY seat_id FOR UPDATE NOWAIT`. Every request therefore acquires
+overlapping seat locks in the same order, preventing lock-order cycles between
+these requests. `NOWAIT` makes a competing request fail quickly with
+`409 seat_taken` instead of occupying a pooled DB connection while waiting.
+If any seat is unavailable or locked, no reservation is written and the whole
 transaction rolls back.
 
 ## Idempotency and exact-once semantics

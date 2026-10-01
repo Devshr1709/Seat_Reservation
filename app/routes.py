@@ -141,7 +141,7 @@ async def reserve(show_id: str, body: ReserveIn, user: str = Depends(token),
         if held + len(seats) > show["per_user_limit"]:
             return ("per_user_limit", None)
         locked = await c.fetch("select seat_id, status from seats where show_id=$1 and seat_id=any($2::text[]) "
-                               "order by seat_id for update", sid, seats)
+                               "order by seat_id for update nowait", sid, seats)
         taken = sorted(r["seat_id"] for r in locked if r["status"] != "available")
         if taken:
             return ("seat_taken", taken)
@@ -157,7 +157,10 @@ async def reserve(show_id: str, body: ReserveIn, user: str = Depends(token),
                         "values($1,$2,$3,$4,$5)", user, sid, key, req_hash, rid)
         return ("ok", r)
 
-    kind, val = await tx(fn)
+    try:
+        kind, val = await tx(fn)
+    except asyncpg.LockNotAvailableError:
+        kind, val = "seat_taken", seats
     if kind == "ok":
         CONFIRMED.inc(); SEATS_CONFIRMED.inc(len(seats))
         L("reserved", user=user, seats=seats, show=str(sid))

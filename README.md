@@ -143,7 +143,7 @@ The atomic decision is intentionally pushed into a single transaction in Postgre
 
 - each seat is stored as a row in `seats(show_id, seat_id)` with a primary key `(show_id, seat_id)`
 - the request is guarded by a transaction-scoped advisory lock per `(user, show)`
-- multi-seat operations lock rows in a deterministic order before re-checking state and updating rows
+- multi-seat operations lock rows in sorted order with `FOR UPDATE NOWAIT`; lock contention becomes a fast `409 seat_taken` instead of occupying a DB connection while waiting
 - the update is conditional on `status = 'available'`
 - the transaction is retried on deadlock/serialization errors
 
