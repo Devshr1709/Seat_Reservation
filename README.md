@@ -29,6 +29,16 @@ export ADMIN_TOKEN="admin-secret"
 python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
+## Integration tests
+
+With the project dependencies installed, start the local database and run the
+Postgres-backed integrity tests:
+
+```bash
+docker compose up -d db
+python3 -m unittest discover -s tests -v
+```
+
 ## Health and readiness
 
 The app exposes:
@@ -137,6 +147,162 @@ The invariant is:
 available + held + confirmed == total_seats
 ```
 
+## End-to-end API example
+
+Use either the local service or the Render deployment. The requests and
+responses are the same; only `BASE_URL` and the admin token differ.
+
+For local Docker, start the stack and set:
+
+```bash
+docker compose up --build -d
+export BASE_URL="http://localhost:8000"
+export ADMIN_TOKEN="admin-secret"
+```
+
+For Render, set the base URL and read the admin token privately from the
+Render service's Environment page:
+
+```bash
+export BASE_URL="https://seat-reservation-b6qg.onrender.com"
+read -s ADMIN_TOKEN
+export ADMIN_TOKEN
+```
+
+Create a show (admin token required):
+
+```bash
+curl -i -X POST "$BASE_URL/shows" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"demo-show","seats":["A1","A2","A3"],"price_paise":25000}'
+```
+
+Expected response (`201`; use the returned ID below):
+
+```json
+{
+  "id": "11111111-2222-4333-8444-555555555555",
+  "name": "demo-show",
+  "price_paise": 25000,
+  "per_user_limit": 4,
+  "total_seats": 3,
+  "seats": {"A1": "available", "A2": "available", "A3": "available"}
+}
+```
+
+Set the ID from that response, then let Alice reserve `A1`:
+
+```bash
+export SHOW_ID="11111111-2222-4333-8444-555555555555"
+curl -i -X POST "$BASE_URL/shows/$SHOW_ID/reserve" \
+  -H "Authorization: Bearer alice" \
+  -H "Idempotency-Key: alice-a1-001" \
+  -H "Content-Type: application/json" \
+  -d '{"seats":["A1"]}'
+```
+
+Expected response (`201`):
+
+```json
+{
+  "reservation_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+  "show_id": "11111111-2222-4333-8444-555555555555",
+  "user_id": "alice",
+  "seats": ["A1"],
+  "amount_paise": 25000,
+  "status": "confirmed"
+}
+```
+
+Repeating Alice's request with the same key and body returns `200` and the same
+reservation:
+
+```bash
+curl -i -X POST "$BASE_URL/shows/$SHOW_ID/reserve" \
+  -H "Authorization: Bearer alice" \
+  -H "Idempotency-Key: alice-a1-001" \
+  -H "Content-Type: application/json" \
+  -d '{"seats":["A1"]}'
+```
+
+Expected response: `200 OK`, header `Idempotent-Replayed: true`, and the same
+`reservation_id` as Alice's first response.
+
+Bob trying to take the same seat on the same show gets `409`:
+
+```bash
+curl -i -X POST "$BASE_URL/shows/$SHOW_ID/reserve" \
+  -H "Authorization: Bearer bob" \
+  -H "Idempotency-Key: bob-a1-001" \
+  -H "Content-Type: application/json" \
+  -d '{"seats":["A1"]}'
+```
+
+```json
+{"error":"seat_taken","seats":["A1"]}
+```
+
+Check the show state; `A1` is confirmed while `A2` and `A3` remain available:
+
+```bash
+curl -sS "$BASE_URL/shows/$SHOW_ID"
+```
+
+```json
+{
+  "id": "11111111-2222-4333-8444-555555555555",
+  "name": "demo-show",
+  "price_paise": 25000,
+  "per_user_limit": 4,
+  "total_seats": 3,
+  "available": 2,
+  "held": 0,
+  "confirmed": 1,
+  "reconciled": true,
+  "seats": {"A1":"confirmed", "A2":"available", "A3":"available"}
+}
+```
+
+Alice can cancel her reservation; then Bob can rebook the released seat:
+
+```bash
+export RESERVATION_ID="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+curl -i -X POST "$BASE_URL/reservations/$RESERVATION_ID/cancel" \
+  -H "Authorization: Bearer alice"
+```
+
+Cancellation returns `200` with the reservation's status set to `cancelled`.
+For example:
+
+```json
+{
+  "reservation_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+  "show_id": "11111111-2222-4333-8444-555555555555",
+  "user_id": "alice",
+  "seats": ["A1"],
+  "amount_paise": 25000,
+  "status": "cancelled"
+}
+```
+
+Retry Bob's reserve command above; it now returns `201` with `user_id` `bob`
+and a new reservation ID:
+
+```json
+{
+  "reservation_id": "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+  "show_id": "11111111-2222-4333-8444-555555555555",
+  "user_id": "bob",
+  "seats": ["A1"],
+  "amount_paise": 25000,
+  "status": "confirmed"
+}
+```
+
+The admin token is only for creating shows; user bearer tokens identify the
+reservation owner. Never put the Render admin token in the README or source.
+
 ## Concurrency and correctness model
 
 The atomic decision is intentionally pushed into a single transaction in Postgres:
@@ -175,9 +341,20 @@ curl -sS http://localhost:8000/metrics
 docker compose logs -f api
 ```
 
-For a hosted deployment, open `https://<service-host>/metrics` for Prometheus
-text output and use the hosting provider's service log viewer (Render:
-Dashboard -> service -> Logs). No live service URL is available yet.
+Live Render endpoints:
+- [Service root](https://seat-reservation-b6qg.onrender.com/)
+- [Swagger UI](https://seat-reservation-b6qg.onrender.com/docs)
+- [OpenAPI schema](https://seat-reservation-b6qg.onrender.com/openapi.json)
+- [Prometheus metrics](https://seat-reservation-b6qg.onrender.com/metrics)
+- [Liveness](https://seat-reservation-b6qg.onrender.com/healthz)
+- [Readiness](https://seat-reservation-b6qg.onrender.com/readyz)
+
+Render application logs are available in the service dashboard under **Logs**.
+The service root and `/metrics` are currently responding. Prometheus counters
+such as `reservations_confirmed_total` are process-local and reset when Render
+restarts the service; the `seats_available` and `show_seats_confirmed` gauges
+are read from Postgres and persist across restarts. Compare those gauges with
+`GET /shows/{id}` for the same show. A decline-reason series appears after that reason occurs in the current process.
 
 ## Burst script
 
@@ -204,6 +381,7 @@ The script prints:
 - hot-seat winner count
 - per-user limit behavior
 - idempotency behavior
+- concurrent cancel/rebook race
 - final reconciliation results
 - PASS/FAIL summary
 
@@ -211,18 +389,10 @@ The script prints:
 
 The repo includes a Render-ready configuration in [render.yaml](render.yaml). It points to Docker and health-checks `/readyz`.
 
-The expected deployment flow is:
-
-```bash
-# in a host that has Docker or a managed app runtime
-# set DATABASE_URL and ADMIN_TOKEN
-# deploy the repo or push to Render / Railway / Fly
-```
-
-Live URL: not deployed yet. `render.yaml` is deployment configuration; it does
-not create a hosted service by itself. After deployment, use the service URL as
-`BASE_URL` when running the burst script and use the provider dashboard for
-runtime logs.
+The service is deployed at [seat-reservation-b6qg.onrender.com](https://seat-reservation-b6qg.onrender.com/).
+Use that base URL as `BASE_URL` when running the burst script. Confirm Render
+has deployed the latest commit before testing; a service restart alone does
+not necessarily build newly pushed code.
 
 ## Verified in this workspace
 
