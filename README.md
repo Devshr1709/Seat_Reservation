@@ -135,6 +135,8 @@ This service uses an all-or-nothing reservation model: if the request includes m
 Reservations are confirmed immediately. Timed holds and automatic expiry are
 not implemented; owner cancellation is the release mechanism. The `held` count
 is included for state compatibility but remains zero in this implementation.
+Show prices are bounded so even a 50-seat reservation amount fits PostgreSQL's
+`BIGINT` storage. Requests above the limit are rejected with `422`.
 
 ### Show state
 `GET /shows/{id}`
@@ -488,7 +490,7 @@ they are not a general capacity guarantee.
 
 ## Deployment notes
 
-The repo includes a Render-ready configuration in [render.yaml](render.yaml). It points to Docker and health-checks `/readyz`.
+The repo includes a Render-ready configuration in [render.yaml](render.yaml). It points to Docker and health-checks `/healthz`, which reports process liveness independently of Postgres. `/readyz` remains the endpoint for checking database readiness.
 
 The service is deployed at [seat-reservation-b6qg.onrender.com](https://seat-reservation-b6qg.onrender.com/).
 Use that base URL as `BASE_URL` when running the burst script. Confirm Render

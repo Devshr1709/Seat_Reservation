@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi.testclient import TestClient
 
+from app.models import MAX_PRICE_PAISE
 from app.routes import app
 
 
@@ -55,6 +56,14 @@ class ReservationIntegrityTests(unittest.TestCase):
         self.assertEqual(state["seats"], {"A1": "confirmed", "A2": "available"})
         self.assertEqual(state["available"] + state["held"] + state["confirmed"], 2)
         self.assertTrue(state["reconciled"])
+
+    def test_show_price_is_bounded_for_bigint_reservation_totals(self):
+        response = self.client.post(
+            "/shows",
+            headers=bearer("admin-secret"),
+            json={"name": "too-expensive", "seats": ["A1"], "price_paise": MAX_PRICE_PAISE + 1},
+        )
+        self.assertEqual(response.status_code, 422, response.text)
 
     def test_hot_seat_has_one_winner_and_clean_declines(self):
         show_id = self.create_show(["A1"])
