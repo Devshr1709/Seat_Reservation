@@ -90,7 +90,60 @@ async def main():
         print(f"cancel by non-owner={c1.status_code} (want 403), by owner={c2.status_code} (want 200)")
         if c1.status_code != 403 or c2.status_code != 200: fails.append("cancel auth")
 
-        # 5. reconciliation: client-side 201s vs server-side truth
+        # 5. race an owner's cancellation against another user's rebooking
+        sh3_response = await cl.post(
+            f"{base}/shows",
+            json={"name": "cancel-rebook", "seats": ["R1"], "price_paise": 100},
+            headers=H(a.admin_token),
+        )
+        sh3_response.raise_for_status()
+        sh3 = sh3_response.json()["id"]
+        seed = await cl.post(
+            f"{base}/shows/{sh3}/reserve",
+            json={"seats": ["R1"], "idempotency_key": "race-seed"},
+            headers=H("alice"),
+        )
+        if seed.status_code != 201:
+            fails.append(f"cancel/rebook setup: reserve returned {seed.status_code}")
+        else:
+            race_rid = seed.json()["reservation_id"]
+            race_key = uuid.uuid4().hex
+            cancel_response, first_rebook = await asyncio.gather(
+                cl.post(f"{base}/reservations/{race_rid}/cancel", headers=H("alice")),
+                cl.post(
+                    f"{base}/shows/{sh3}/reserve",
+                    json={"seats": ["R1"], "idempotency_key": race_key},
+                    headers=H("bob"),
+                ),
+            )
+            rebook = first_rebook
+            if first_rebook.status_code == 409:
+                error = first_rebook.json().get("error")
+                if error == "seat_taken":
+                    rebook = await cl.post(
+                        f"{base}/shows/{sh3}/reserve",
+                        json={"seats": ["R1"], "idempotency_key": race_key},
+                        headers=H("bob"),
+                    )
+            race_state = (await cl.get(f"{base}/shows/{sh3}")).json()
+            race_ok = (
+                cancel_response.status_code == 200
+                and rebook.status_code == 201
+                and rebook.json().get("user_id") == "bob"
+                and race_state["confirmed"] == 1
+                and race_state["available"] == 0
+                and race_state["reconciled"]
+            )
+            print(
+                "cancel/rebook race: "
+                f"cancel={cancel_response.status_code}, "
+                f"first_rebook={first_rebook.status_code}, "
+                f"final_rebook={rebook.status_code} -> {'ok' if race_ok else 'FAIL'}"
+            )
+            if not race_ok:
+                fails.append("concurrent cancel/rebook or final seat state")
+
+        # 6. reconciliation: client-side 201s vs server-side truth
         s = (await cl.get(f"{base}/shows/{SHOW}")).json()
         total = s["available"] + s["held"] + s["confirmed"]
         print("\noutcome distribution:")
