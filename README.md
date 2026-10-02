@@ -362,6 +362,10 @@ are read from Postgres and persist across restarts. Compare those gauges with
 
 ## Burst script
 
+### Long-form recording
+
+[Recording of the load test](https://drive.google.com/file/d/11E5fDczKvTkjauXdB4qRkDYj2GibhsK6/view?usp=sharing)
+
 This repository includes a one-command stress tool:
 
 ```bash
@@ -388,6 +392,99 @@ The script prints:
 - concurrent cancel/rebook race
 - final reconciliation results
 - PASS/FAIL summary
+
+### Local Docker run
+
+After `docker compose up --build -d`, run the full default workload against
+localhost:
+
+```bash
+./burst.sh http://localhost:8000 --admin-token admin-secret
+```
+
+Verified locally with the default 20,000 requests and concurrency 500:
+
+```text
+hot-seat storm S1: winners=1 (want 1)
+stampede done in 61.8s; seats double-confirmed: 0 (want 0)
+per-user limit: 10 parallel -> 4 confirmed (want <=4)
+idempotency/spoof: 201,200,409 user=alice -> ok
+cancel by non-owner=403 (want 403), by owner=200 (want 200)
+cancel/rebook race: cancel=200, first_rebook=409, final_rebook=201 -> ok
+reconcile: available=63 held=0 confirmed=1937 total=2000 sum=2000
+201-but-not-confirmed (must be 0): 0 []
+confirmed-without-201: 0 (explained by lost responses: 0, unexplained: 0 [])
+RESULT: PASS
+```
+
+The run above sent 20,000 stampede requests with up to 500 in flight; it does
+not mean all 20,000 were simultaneous. The burst script now also checks the
+500-request hot-seat phase separately and fails unless it gets exactly one
+`201`, 499 `409 seat_taken` responses, and no 5xx or client errors. The output
+above is from the earlier run, before those extra hot-seat counts were printed.
+
+### Render deployment runs
+
+Set the admin token in your shell rather than putting a live token in command
+history or this README. The script reads `ADMIN_TOKEN` from the environment:
+
+```bash
+read -s ADMIN_TOKEN
+export ADMIN_TOKEN
+```
+
+On the deployed Render service, 2,000 requests at concurrency 30 completed:
+
+```bash
+./burst.sh https://seat-reservation-b6qg.onrender.com \
+  --requests 2000 \
+  --concurrency 30
+```
+
+```text
+hot-seat storm S1: winners=1 (want 1)
+stampede done in 55.2s; seats double-confirmed: 0 (want 0)
+per-user limit: 10 parallel -> 4 confirmed (want <=4)
+idempotency/spoof: 201,200,409 user=alice -> ok
+cancel by non-owner=403 (want 403), by owner=200 (want 200)
+cancel/rebook race: cancel=200, first_rebook=201, final_rebook=201 -> ok
+reconcile: available=1236 held=0 confirmed=764 total=2000 sum=2000
+201-but-not-confirmed (must be 0): 0 []
+confirmed-without-201: 0 (explained by lost responses: 0, unexplained: 0 [])
+RESULT: PASS
+```
+
+At 20,000 stampede requests and concurrency 30, the same Render free-tier deployment
+preserved the seat invariants but the run returned client timeouts:
+
+```bash
+./burst.sh https://seat-reservation-b6qg.onrender.com \
+  --requests 20000 \
+  --concurrency 30
+```
+
+```text
+stampede done in 588.7s; seats double-confirmed: 0 (want 0)
+per-user limit: 10 parallel -> 4 confirmed (want <=4)
+idempotency/spoof: 201,200,409 user=alice -> ok
+cancel by non-owner=403 (want 403), by owner=200 (want 200)
+cancel/rebook race: cancel=200, first_rebook=201, final_rebook=201 -> ok
+  client_error:ReadTimeout           28
+reconcile: available=60 held=0 confirmed=1940 total=2000 sum=2000
+201-but-not-confirmed (must be 0): 0 []
+confirmed-without-201: 0 (explained by lost responses: 0, unexplained: 0 [])
+RESULT: FAIL 28 5xx/client errors
+```
+
+The burst client uses a 120-second request timeout. The 20,000-request run
+therefore failed its strict client-error check because 28 responses arrived
+too late or were not received. The final database reconciliation still had no
+double-sold seats and no unexplained confirmations. This is the observed
+capacity difference for these runs: localhost passed at the default workload,
+while the Render free-tier service passed 2,000 requests at concurrency 30 and
+timed out on some requests at 20,000. These results describe the tested runs;
+they are not a general capacity guarantee.
+
 
 ## Deployment notes
 

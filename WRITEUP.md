@@ -128,23 +128,46 @@ over write availability during a database partition: callers should retry
 after connectivity recovers using the same idempotency key.
 
 ## Observability and paging
-The service exposes a small but useful Prometheus surface:
+The service exposes Prometheus metrics for:
 - `reservations_confirmed_total`
 - `reservations_declined_total{reason=...}`
 - `seats_available{show_id=...}`
 - request counter middleware metrics
 
-Structured logs are emitted as JSON with a `request_id` and an inbound `X-Request-ID` is honored if provided. I would page on:
-- `/readyz` returning `503` for more than a short interval
-- a non-zero `5xx` rate
-- reconciliation mismatch (`available + held + confirmed != total_seats`)
-- surprising metrics drift between DB state and scraped gauges
-- rising DB pool timeouts or transaction retries
+Structured logs are emitted as JSON with a `request_id`; an inbound
+`X-Request-ID` is preserved when provided. The application exposes metrics and
+logs, but alert rules are not configured in this repository. For an initial
+on-call setup, page on:
+- `/readyz` failing continuously for 2 minutes
+- a sustained `5xx` rate above 1% over 5 minutes, or any sharp increase
+- a reconciliation mismatch for any show
+- database connection or pool-acquisition failures that persist for 2 minutes
+
+These thresholds are starting points and should be tuned to actual traffic and
+service objectives. Transaction retry counts are not currently exposed as a
+metric, so they cannot be alerted on directly without adding instrumentation.
+
+## Load test evidence and limits
+
+The accompanying burst script exercises hot-seat contention, per-user limits,
+idempotency, cancellation, and final seat reconciliation. In the recorded
+local Docker run, the default workload of 20,000 requests at concurrency 500
+passed with no double-confirmed seats or unexplained confirmations. On the
+Render free-tier deployment, a 2,000-request run at concurrency 30 passed.
+A 20,000-request Render run at concurrency 30 preserved seat invariants but
+timed out on 28 client requests and therefore failed the script's strict
+client-error check. These are observations from specific runs, not a capacity
+or latency guarantee; the larger Render result shows that callers may see
+timeouts under load even when database reconciliation remains correct.
+
+The long-form load-test recording is linked from the project's README.
 
 ## AI usage disclosure
-I used AI as a coding accelerator, not as a substitute for correctness review. The system design was directed by the explicit requirements around atomicity, per-user limits, idempotency, and fail-closed readiness. I then validated the implementation against the real Postgres transaction semantics and an actual Dockerized burst run rather than accepting the generated result on trust.
-
-The important part is that the concurrency guarantees were checked with live behavior: hot-seat winner count, idempotency replay behavior, 4xx declines instead of 5xx, and reconciliation after the burst. I did not treat the AI output as final until it was tested against the exact conditions the service must satisfy.
+AI assistance was used when stuck during implementation and documentation and as coding accelerator. The reservation
+behavior was checked with Postgres-backed integration tests and burst runs,
+including hot-seat contention, idempotency replay, and post-run seat
+reconciliation. Those runs do not prove correctness for every possible
+concurrent workload.
 
 ## What I would do next
 If this were extended for a production launch, the next steps would be:
@@ -154,4 +177,7 @@ If this were extended for a production launch, the next steps would be:
 - add SLO alerts for readyz failures, 5xx rates, and reconciliation drift
 - add queueing or admission control under extremely large ticket drops
 
-The simple and safe model that is already implemented here is solid: Postgres as the source of truth, failure is declared as a 4xx domain outcome, and readiness is only announced when the database dependency is actually reachable.
+The current implementation uses Postgres as the source of truth and only
+reports readiness when the database is reachable. Reservation declines use
+4xx responses; database connectivity failures return 503, and unexpected
+errors can return 500.
