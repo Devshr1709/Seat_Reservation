@@ -132,6 +132,10 @@ This service uses an all-or-nothing reservation model: if the request includes m
 - Non-owner requests return `403`.
 - Duplicate cancel requests are idempotent and return the current reservation state.
 
+Reservations are confirmed immediately. Timed holds and automatic expiry are
+not implemented; owner cancellation is the release mechanism. The `held` count
+is included for state compatibility but remains zero in this implementation.
+
 ### Show state
 `GET /shows/{id}`
 
