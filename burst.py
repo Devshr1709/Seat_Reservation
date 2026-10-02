@@ -46,8 +46,28 @@ async def main():
 
         # 1. hot-seat storm: 500 distinct users, same seat
         await asyncio.gather(*[reserve(cl, sem, f"storm{i}", ["S1"]) for i in range(500)])
-        print(f"hot-seat storm S1: winners={len(winners['S1'])} (want 1)")
-        if len(winners["S1"]) != 1: fails.append("hot seat not exactly one winner")
+        hot_storm = dist.copy()
+        hot_winners = hot_storm.get("201", 0)
+        hot_declines = hot_storm.get("409:seat_taken", 0)
+        print("hot-seat outcomes:", dict(sorted(hot_storm.items())))
+        hot_errors = sum(
+            count for outcome, count in hot_storm.items()
+            if outcome.startswith("5") or outcome.startswith("client_error")
+        )
+        print(
+            f"hot-seat storm S1: winners={hot_winners} (want 1), "
+            f"seat_taken={hot_declines} (want 499), errors={hot_errors} (want 0)"
+        )
+        if hot_winners != 1:
+            fails.append(f"hot seat returned {hot_winners} winners (want 1)")
+        if hot_declines != 499:
+            fails.append(f"hot seat returned {hot_declines} seat_taken declines (want 499)")
+        if hot_winners + hot_declines != 500:
+            fails.append(
+                f"hot-seat storm had {hot_winners + hot_declines} expected outcomes (want 500)"
+            )
+        if hot_errors:
+            fails.append(f"hot-seat storm had {hot_errors} 5xx/client errors")
         dist.clear()   # keep winners: S1's winner is real and must stay in the final reconciliation
 
         # 2. full stampede: contended hot seats, random seats, 10% retries with same key
