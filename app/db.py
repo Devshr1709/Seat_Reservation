@@ -1,5 +1,6 @@
 import asyncio
 import random
+from contextlib import asynccontextmanager
 
 import asyncpg
 
@@ -30,6 +31,25 @@ READY = False
 INIT_LOCK = asyncio.Lock()
 
 
+class PoolAcquireTimeout(Exception):
+    """Raised when a request cannot get a DB connection within its wait budget."""
+
+
+@asynccontextmanager
+async def acquire(timeout=50):
+    """Acquire a pooled connection and distinguish pool saturation from query errors."""
+    await ensure_db()
+    context = POOL.acquire(timeout=timeout)
+    try:
+        connection = await context.__aenter__()
+    except asyncio.TimeoutError as e:
+        raise PoolAcquireTimeout from e
+    try:
+        yield connection
+    finally:
+        await context.__aexit__(None, None, None)
+
+
 async def ensure_db():
     global POOL, READY
     if READY:
@@ -48,11 +68,10 @@ async def ensure_db():
 
 
 async def tx(fn, tries=6):
-    """Run fn(conn) in one transaction; retry on deadlock/serialization (never surfaces as 5xx)."""
-    await ensure_db()
+    """Run fn(conn) transactionally, retrying deadlock/serialization failures."""
     for i in range(tries):
         try:
-            async with POOL.acquire(timeout=50) as c:
+            async with acquire() as c:
                 async with c.transaction():
                     return await fn(c)
         except (asyncpg.DeadlockDetectedError, asyncpg.SerializationError):

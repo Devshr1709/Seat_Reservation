@@ -47,6 +47,16 @@ async def _dbdown(request, exc):
     return JSONResponse({"error": "dependency_unavailable"}, status_code=503)
 
 
+@app.exception_handler(db.PoolAcquireTimeout)
+async def _pool_busy(request, exc):
+    DECLINED.labels("server_busy").inc()
+    return JSONResponse(
+        {"error": "server_busy"},
+        status_code=429,
+        headers={"Retry-After": "1"},
+    )
+
+
 def err(status, code, **extra):
     return JSONResponse({"error": code, **extra}, status_code=status)
 
@@ -86,8 +96,7 @@ async def get_show(show_id: str, include_seats: bool = True):
     sid = valid_uuid(show_id)
     if not sid:
         return err(404, "show_not_found")
-    await ensure_db()
-    async with db.POOL.acquire(timeout=90) as c:
+    async with db.acquire() as c:
         async with c.transaction(isolation="repeatable_read", readonly=True):
             s = await c.fetchrow("select * from shows where id=$1", sid)
             if not s:
