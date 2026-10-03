@@ -52,7 +52,7 @@ async def tx(fn, tries=6):
     await ensure_db()
     for i in range(tries):
         try:
-            async with POOL.acquire(timeout=90) as c:
+            async with POOL.acquire(timeout=50) as c:
                 async with c.transaction():
                     return await fn(c)
         except (asyncpg.DeadlockDetectedError, asyncpg.SerializationError):
