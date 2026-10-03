@@ -120,6 +120,7 @@ Expected outcomes:
 - `201` new reservation
 - `200` replay of a previously accepted request with the same key
 - `409` domain decline such as `seat_taken`, `per_user_limit`, or `idempotency_key_conflict`
+- `429` database pool is saturated; response includes `Retry-After: 1`, so retry using the same idempotency key
 - `404` unknown show or unknown seat
 - `401` invalid or missing bearer token
 
@@ -338,7 +339,7 @@ The key metrics are:
 - `seats_available{show_id="..."}`
 - HTTP counters from the request middleware
 
-Structured logs are written to stdout with a `request_id`, and the service honors an inbound `X-Request-ID` header when present.
+Structured JSON logs are written to the container log stream (stderr by default) with a `request_id`; Docker and Render capture this stream. The service honors an inbound `X-Request-ID` header when present. Logs are not stored in the application database.
 
 For a local Docker run:
 
@@ -356,10 +357,10 @@ Live Render endpoints:
 - [Readiness](https://seat-reservation-b6qg.onrender.com/readyz)
 
 Render application logs are available in the service dashboard under **Logs**.
-The service root and `/metrics` are currently responding. Prometheus counters
-such as `reservations_confirmed_total` are process-local and reset when Render
-restarts the service; the `seats_available` and `show_seats_confirmed` gauges
-are read from Postgres and persist across restarts. Compare those gauges with
+Prometheus counters such as `reservations_confirmed_total` are process-local
+and reset when the service restarts; the `seats_available` and
+`show_seats_confirmed` gauges are read from Postgres and persist across
+restarts. Compare those gauges with
 `GET /shows/{id}` for the same show. A decline-reason series appears after that reason occurs in the current process.
 
 ## Burst script
@@ -397,95 +398,70 @@ The script prints:
 
 ### Local Docker run
 
-After `docker compose up --build -d`, run the full default workload against
+After `docker compose up --build -d`, run the default workload against
 localhost:
 
 ```bash
 ./burst.sh http://localhost:8000 --admin-token admin-secret
 ```
 
-Verified locally with the default 20,000 requests and concurrency 500:
-
-```text
-hot-seat storm S1: winners=1 (want 1)
-stampede done in 61.8s; seats double-confirmed: 0 (want 0)
-per-user limit: 10 parallel -> 4 confirmed (want <=4)
-idempotency/spoof: 201,200,409 user=alice -> ok
-cancel by non-owner=403 (want 403), by owner=200 (want 200)
-cancel/rebook race: cancel=200, first_rebook=409, final_rebook=201 -> ok
-reconcile: available=63 held=0 confirmed=1937 total=2000 sum=2000
-201-but-not-confirmed (must be 0): 0 []
-confirmed-without-201: 0 (explained by lost responses: 0, unexplained: 0 [])
-RESULT: PASS
-```
-
-The run above sent 20,000 stampede requests with up to 500 in flight; it does
-not mean all 20,000 were simultaneous. The burst script now also checks the
-500-request hot-seat phase separately and fails unless it gets exactly one
-`201`, 499 `409 seat_taken` responses, and no 5xx or client errors. The output
-above is from the earlier run, before those extra hot-seat counts were printed.
+The default stampede workload sends 20,000 requests with up to 500 in flight;
+the hot-seat phase separately checks that one of 500 requests wins a single
+seat and the rest receive `409 seat_taken`. The script also checks idempotent
+retries, per-user limits, cancellation ownership, cancel/rebook concurrency,
+and final seat reconciliation. It reports `PASS` only when the expected
+outcomes and seat invariants hold.
 
 ### Render deployment runs
 
+Target URL (no admin token is included):
+
+```text
+https://seat-reservation-b6qg.onrender.com
+```
+
 Set the admin token in your shell rather than putting a live token in command
-history or this README. The script reads `ADMIN_TOKEN` from the environment:
+history or this README. The script reads `ADMIN_TOKEN` from the environment.
+Then run:
 
 ```bash
 read -s ADMIN_TOKEN
 export ADMIN_TOKEN
-```
-
-On the deployed Render service, 2,000 requests at concurrency 30 completed:
-
-```bash
 ./burst.sh https://seat-reservation-b6qg.onrender.com \
-  --requests 2000 \
-  --concurrency 30
+  --requests 20000 \
+  --concurrency 500
 ```
+
+The full run takes about 5 minutes. At concurrency 500, outcomes can vary:
+two recent runs passed and one returned `502` errors. If a run fails, try it
+once or twice more to see whether the failure repeats; each attempt takes
+about 5 minutes. A rerun helps assess repeatability but does not guarantee the
+service will pass every run.
+
+Latest passing run: 20,000 stampede requests at client concurrency 500,
+completed in 495.0 seconds. It also ran the 500-request hot-seat check and
+the integrity scenarios:
 
 ```text
-hot-seat storm S1: winners=1 (want 1)
-stampede done in 55.2s; seats double-confirmed: 0 (want 0)
-per-user limit: 10 parallel -> 4 confirmed (want <=4)
-idempotency/spoof: 201,200,409 user=alice -> ok
-cancel by non-owner=403 (want 403), by owner=200 (want 200)
-cancel/rebook race: cancel=200, first_rebook=201, final_rebook=201 -> ok
-reconcile: available=1236 held=0 confirmed=764 total=2000 sum=2000
-201-but-not-confirmed (must be 0): 0 []
-confirmed-without-201: 0 (explained by lost responses: 0, unexplained: 0 [])
+outcomes: 258 replays, 1,720 confirmed, 1 per-user-limit decline,
+          19,729 seat-taken declines, 205 server-busy responses
+reconcile: available=58 held=0 confirmed=1942 total=2000
+double-confirmed seats: 0
+201 responses without confirmed seats: 0
+confirmed seats without a corresponding 201 or failed request: 0
 RESULT: PASS
 ```
 
-At 20,000 stampede requests and concurrency 30, the same Render free-tier deployment
-preserved the seat invariants but the run returned client timeouts:
-
-```bash
-./burst.sh https://seat-reservation-b6qg.onrender.com \
-  --requests 20000 \
-  --concurrency 30
-```
-
-```text
-stampede done in 588.7s; seats double-confirmed: 0 (want 0)
-per-user limit: 10 parallel -> 4 confirmed (want <=4)
-idempotency/spoof: 201,200,409 user=alice -> ok
-cancel by non-owner=403 (want 403), by owner=200 (want 200)
-cancel/rebook race: cancel=200, first_rebook=201, final_rebook=201 -> ok
-  client_error:ReadTimeout           28
-reconcile: available=60 held=0 confirmed=1940 total=2000 sum=2000
-201-but-not-confirmed (must be 0): 0 []
-confirmed-without-201: 0 (explained by lost responses: 0, unexplained: 0 [])
-RESULT: FAIL 28 5xx/client errors
-```
-
-The burst client uses a 120-second request timeout. The 20,000-request run
-therefore failed its strict client-error check because 28 responses arrived
-too late or were not received. The final database reconciliation still had no
-double-sold seats and no unexplained confirmations. This is the observed
-capacity difference for these runs: localhost passed at the default workload,
-while the Render free-tier service passed 2,000 requests at concurrency 30 and
-timed out on some requests at 20,000. These results describe the tested runs;
-they are not a general capacity guarantee.
+`429 server_busy` responses are intentional backpressure: the app returns
+them with `Retry-After: 1` when a request cannot acquire a database
+connection within the configured pool-acquisition timeout. They prevent pool
+overload from turning into long waits and generic `500` responses. `NOWAIT`
+row-lock conflicts on contested seats are handled separately as `409
+seat_taken`. A separate run returned 149 `502` responses alongside 131
+`429`s and failed the script; the cause of those `502`s has not been confirmed.
+These runs demonstrate reservation and reconciliation behavior for this
+workload, not a general capacity or latency guarantee. The script's printed
+Prometheus counters are cumulative service totals, not per-run counts.
 
 
 ## Deployment notes

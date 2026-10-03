@@ -134,9 +134,11 @@ The service exposes Prometheus metrics for:
 - `seats_available{show_id=...}`
 - request counter middleware metrics
 
-Structured logs are emitted as JSON with a `request_id`; an inbound
-`X-Request-ID` is preserved when provided. The application exposes metrics and
-logs, but alert rules are not configured in this repository. For an initial
+Structured logs are emitted as JSON to the container log stream (stderr by
+default) with a `request_id`; an inbound `X-Request-ID` is preserved when
+provided. Docker and Render capture this stream; logs are not stored in the
+application database. The application exposes metrics and logs, but alert
+rules are not configured in this repository. For an initial
 on-call setup, page on:
 - `/readyz` failing continuously for 2 minutes
 - a sustained `5xx` rate above 1% over 5 minutes, or any sharp increase
@@ -150,15 +152,28 @@ metric, so they cannot be alerted on directly without adding instrumentation.
 ## Load test evidence and limits
 
 The accompanying burst script exercises hot-seat contention, per-user limits,
-idempotency, cancellation, and final seat reconciliation. In the recorded
-local Docker run, the default workload of 20,000 requests at concurrency 500
-passed with no double-confirmed seats or unexplained confirmations. On the
-Render free-tier deployment, a 2,000-request run at concurrency 30 passed.
-A 20,000-request Render run at concurrency 30 preserved seat invariants but
-timed out on 28 client requests and therefore failed the script's strict
-client-error check. These are observations from specific runs, not a capacity
-or latency guarantee; the larger Render result shows that callers may see
-timeouts under load even when database reconciliation remains correct.
+idempotency, cancellation, and final seat reconciliation. Pool-acquisition
+timeouts return `429 server_busy` with `Retry-After: 1`, allowing clients to
+retry instead of waiting for a database connection indefinitely. Row-lock
+conflicts from simultaneous requests for the same seat return `409
+seat_taken`.
+
+Recent Render runs at client concurrency 500 show variable outcomes: two
+completed with `RESULT: PASS`, and one failed with 149 `502` responses and
+131 `429 server_busy` responses. The source of those `502`s has not been
+confirmed. Each full 20,000-request run takes about five minutes; rerunning
+once or twice after a failure can help determine whether it repeats, but does
+not guarantee a pass.
+
+In the latest passing run, the 20,000-request workload completed in 495.0
+seconds. It returned 258 idempotent replays, 1,720 confirmed reservations, 1
+per-user-limit decline, 19,729 seat-taken declines, and 205 server-busy
+responses, with no `5xx` or client errors. Reconciliation found 58 available,
+0 held, and 1,942 confirmed seats out of 2,000, with no double-confirmed seats
+or mismatch between successful responses and confirmed seats. The script
+reported `RESULT: PASS`. The metrics printed by the script are cumulative
+service counters, not counts for that individual run. These results describe
+this workload and do not establish a general capacity or latency guarantee.
 
 The long-form load-test recording is linked from the project's README.
 
